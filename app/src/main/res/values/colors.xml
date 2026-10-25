@@ -1,0 +1,6 @@
+<resources>
+    <color name="shadow_void">#FF05010B</color>
+    <color name="shadow_violet">#FF8B5CF6</color>
+    <color name="shadow_glow">#FFB794FF</color>
+    <color name="ic_launcher_background">#FF0B0216</color>
+</resources>

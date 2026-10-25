@@ -1,0 +1,58 @@
+name: Build APK
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Unit tests
+        run: ./gradlew testDebugUnitTest --tests '*IntentRouterTest' --tests '*LlmParsingTest'
+
+      - name: Signing key (from repo secrets, if set)
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > release.jks
+            printf 'storeFile=release.jks\nstorePassword=%s\nkeyAlias=shadow\nkeyPassword=%s\n' "$KEYSTORE_PASSWORD" "$KEYSTORE_PASSWORD" > keystore.properties
+          fi
+
+      - name: Build APKs
+        run: ./gradlew assembleRelease assembleDebug
+
+      - name: Pick the APK
+        run: |
+          if [ -f app/build/outputs/apk/release/app-release.apk ] && [ -f keystore.properties ]; then
+            cp app/build/outputs/apk/release/app-release.apk Shadow.apk
+          else
+            cp app/build/outputs/apk/debug/app-debug.apk Shadow.apk
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Shadow-apk
+          path: Shadow.apk
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: Shadow v1.0.${{ github.run_number }}
+          body: "Download **Shadow.apk** below and open it on your Android phone. See the README for setup."
+          files: Shadow.apk
+          make_latest: true

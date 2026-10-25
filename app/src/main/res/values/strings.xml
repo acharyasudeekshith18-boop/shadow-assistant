@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Shadow</string>
+    <string name="tile_label">Hey Shadow</string>
+    <string name="shortcut_talk">Talk to Shadow</string>
+</resources>

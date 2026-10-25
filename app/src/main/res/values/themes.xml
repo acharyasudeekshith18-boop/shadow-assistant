@@ -1,0 +1,7 @@
+<resources>
+    <style name="Theme.Shadow" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/shadow_void</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@color/shadow_void</item>
+    </style>
+</resources>
