@@ -56,6 +56,7 @@ fun SettingsScreen(
     onTestVoice: () -> Unit,
     onOpenUrl: (String) -> Unit,
     onBack: () -> Unit,
+    onOpenDebugLog: () -> Unit = {},
 ) {
     var gemini by remember { mutableStateOf(settings.geminiKey) }
     var groq by remember { mutableStateOf(settings.groqKey) }
@@ -63,6 +64,7 @@ fun SettingsScreen(
     var name by remember { mutableStateOf(settings.userName) }
     var model by remember { mutableStateOf(settings.geminiModel) }
     var lang by remember { mutableStateOf(settings.listenLanguage) }
+    var patience by remember { mutableStateOf(settings.patience) }
     var cc by remember { mutableStateOf(settings.countryCode) }
     var continuous by remember { mutableStateOf(settings.continuous) }
     var speak by remember { mutableStateOf(settings.speakReplies) }
@@ -75,7 +77,7 @@ fun SettingsScreen(
 
     fun save() {
         settings.geminiKey = gemini; settings.groqKey = groq; settings.elevenKey = eleven
-        settings.userName = name; settings.geminiModel = model; settings.listenLanguage = lang; settings.countryCode = cc
+        settings.userName = name; settings.geminiModel = model; settings.listenLanguage = lang; settings.patience = patience; settings.countryCode = cc
         settings.continuous = continuous; settings.speakReplies = speak; settings.greetOnOpen = greet
         settings.voiceEngine = engine; settings.deviceVoice = devVoice; settings.pitch = pitch; settings.speed = speed
         settings.geminiVoice = gVoice
@@ -94,7 +96,13 @@ fun SettingsScreen(
             TextButton(onClick = { onOpenUrl("https://aistudio.google.com/apikey") }) { Text("Get a free Gemini key →", color = ShadowColors.Glow) }
             KeyField("Groq key (optional backup)", groq) { groq = it }
             TextButton(onClick = { onOpenUrl("https://console.groq.com/keys") }) { Text("Get a free Groq key →", color = ShadowColors.Glow) }
-            Field("Gemini model", model) { model = it }
+            Text("AI model", color = ShadowColors.Text)
+            listOf(
+                "auto" to "Auto (recommended): best free model first, switches by itself when one runs out",
+                "gemini-flash-latest" to "Gemini Flash only (smartest, small free limit)",
+                "gemini-flash-lite-latest" to "Gemini Flash-Lite first (fast, bigger free limit)",
+                "gemma-4-31b-it" to "Gemma first (open model, biggest free limit)",
+            ).forEach { (id, label) -> RadioRow(label, model == id) { model = id } }
 
             Section("You")
             Field("Your name", name) { name = it }
@@ -102,6 +110,12 @@ fun SettingsScreen(
             listOf("en-IN" to "English (India)", "kn-IN" to "ಕನ್ನಡ Kannada", "hi-IN" to "हिन्दी Hindi").forEach { (code, label) ->
                 RadioRow(label, lang == code) { lang = code }
             }
+            Text("When I pause while talking, wait…", color = ShadowColors.Text)
+            listOf(0 to "A little (quick replies)", 1 to "Normal", 2 to "Longer (I pause a lot / think while talking)").forEach { (p, label) ->
+                RadioRow(label, patience == p) { patience = p }
+            }
+            Text("Tip: press and hold the orb while you talk, and let go when you're done. Nothing gets cut off that way.",
+                color = ShadowColors.Muted, fontSize = 12.sp)
             Field("Country code for WhatsApp numbers", cc, KeyboardType.Number) { cc = it }
 
             Section("Conversation")
@@ -136,6 +150,11 @@ fun SettingsScreen(
             Button(onClick = { save(); onTestVoice() }, colors = ButtonDefaults.buttonColors(containerColor = ShadowColors.Violet)) {
                 Text("Test Shadow's voice")
             }
+            Section("Help")
+            OutlinedButton(onClick = { save(); onOpenDebugLog() }, modifier = Modifier.fillMaxWidth()) {
+                Text("Debug log (last 20 problems)", color = ShadowColors.Text)
+            }
+            Text("Shadow v${com.sudeekshith.shadow.BuildConfig.VERSION_NAME}", color = ShadowColors.Muted, fontSize = 11.sp)
             Spacer(Modifier.height(8.dp))
             Button(onClick = { save(); onBack() }, modifier = Modifier.fillMaxWidth(),
                 colors = ButtonDefaults.buttonColors(containerColor = ShadowColors.Magenta)) { Text("Save") }
@@ -186,6 +205,30 @@ fun SettingsScreen(
         DropdownMenu(open, { open = false }) {
             DropdownMenuItem(text = { Text("Auto (deepest English voice)") }, onClick = { on(""); open = false })
             voices.take(40).forEach { v -> DropdownMenuItem(text = { Text(v, fontSize = 13.sp) }, onClick = { on(v); open = false }) }
+        }
+    }
+}
+
+/** Last 20 speech/AI problems with times, so he can screenshot them and send them over. */
+@Composable
+fun DebugLogScreen(entries: List<com.sudeekshith.shadow.data.DebugLog.Entry>, onClear: () -> Unit, onBack: () -> Unit) {
+    Column(Modifier.fillMaxSize().background(ShadowColors.Void).statusBarsPadding().navigationBarsPadding()) {
+        Row(Modifier.fillMaxWidth().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = ShadowColors.Glow) }
+            Text("DEBUG LOG", color = ShadowColors.Glow, fontFamily = FontFamily.Monospace, fontSize = 20.sp, fontWeight = FontWeight.Bold,
+                letterSpacing = 3.sp, modifier = Modifier.weight(1f))
+            TextButton(onClick = onClear) { Text("Clear", color = ShadowColors.Muted) }
+        }
+        Text("Newest first. Take a screenshot of this screen and send it to get a problem fixed. No keys are shown here.",
+            color = ShadowColors.Muted, fontSize = 12.sp, modifier = Modifier.padding(horizontal = 16.dp))
+        Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (entries.isEmpty()) Text("No problems recorded. 👍", color = ShadowColors.Text)
+            entries.forEach { e ->
+                Column(Modifier.fillMaxWidth().background(ShadowColors.Panel, RoundedCornerShape(10.dp)).padding(10.dp)) {
+                    Text(e.time, color = ShadowColors.Glow, fontFamily = FontFamily.Monospace, fontSize = 11.sp)
+                    Text(e.text, color = ShadowColors.Text, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+                }
+            }
         }
     }
 }

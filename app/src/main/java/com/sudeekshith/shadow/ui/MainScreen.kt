@@ -1,5 +1,10 @@
 package com.sudeekshith.shadow.ui
 
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
+import androidx.compose.ui.input.pointer.pointerInput
+
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -63,6 +68,8 @@ fun MainScreen(
     onSend: (String) -> Unit,
     onSettings: () -> Unit,
     onClear: () -> Unit,
+    onOrbHoldStart: () -> Unit = {},
+    onOrbHoldEnd: () -> Unit = {},
 ) {
     Column(
         Modifier.fillMaxSize()
@@ -84,14 +91,14 @@ fun MainScreen(
         Box(Modifier.fillMaxWidth().height(250.dp), contentAlignment = Alignment.Center) {
             ShadowOrb(state.status, state.level,
                 Modifier.size(240.dp).clip(CircleShape)
-                    .clickable(remember { MutableInteractionSource() }, indication = null, onClick = onOrbTap))
+                    .orbGestures(onTap = onOrbTap, onHoldStart = onOrbHoldStart, onHoldEnd = onOrbHoldEnd))
         }
         Text(
             when (state.status) {
-                Status.Idle -> if (state.conversation) "…" else "TAP THE ORB TO TALK"
-                Status.Listening -> "LISTENING…"
+                Status.Idle -> if (state.conversation) "…" else "TAP TO TALK · OR HOLD THE ORB"
+                Status.Listening -> if (state.holding) "LISTENING · RELEASE TO SEND" else "LISTENING · TAP TO SEND"
                 Status.Thinking -> "THINKING…"
-                Status.Speaking -> "SPEAKING…"
+                Status.Speaking -> "SPEAKING · TAP TO STOP"
             },
             Modifier.fillMaxWidth(), color = ShadowColors.Glow, textAlign = TextAlign.Center,
             fontFamily = FontFamily.Monospace, fontSize = 13.sp, letterSpacing = 3.sp
@@ -99,6 +106,10 @@ fun MainScreen(
         if (state.partial.isNotBlank()) {
             Text("“${state.partial}”", Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 4.dp),
                 color = ShadowColors.Text, textAlign = TextAlign.Center, fontSize = 15.sp)
+        }
+        if (state.hint.isNotBlank() && state.partial.isBlank()) {
+            Text(state.hint, Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 2.dp), color = ShadowColors.Muted,
+                textAlign = TextAlign.Center, fontSize = 12.sp)
         }
         if (state.conversation) {
             Text("Conversation mode · say “bye” to stop", Modifier.fillMaxWidth(), color = ShadowColors.Muted,
@@ -149,12 +160,30 @@ private fun Bubble(m: ChatTurn) {
         val shape = RoundedCornerShape(18.dp, 18.dp, if (m.fromUser) 4.dp else 18.dp, if (m.fromUser) 18.dp else 4.dp)
         Column(
             Modifier.widthIn(max = 300.dp).clip(shape)
-                .background(if (m.fromUser) ShadowColors.Violet.copy(alpha = 0.85f) else ShadowColors.Panel)
+                .background(if (m.fromUser) ShadowColors.Violet.copy(alpha = 0.85f) else if (m.meta) ShadowColors.Void else ShadowColors.Panel)
                 .border(1.dp, if (m.fromUser) ShadowColors.Violet else ShadowColors.PanelHi, shape)
                 .padding(horizontal = 14.dp, vertical = 10.dp)
         ) {
             if (!m.fromUser) Text("SHADOW", color = ShadowColors.Glow, fontSize = 10.sp, fontFamily = FontFamily.Monospace, letterSpacing = 2.sp)
-            Text(m.text, color = ShadowColors.Text, fontSize = 15.sp, lineHeight = 20.sp)
+            Text(m.text, color = if (m.meta) ShadowColors.Muted else ShadowColors.Text, fontSize = if (m.meta) 13.sp else 15.sp, lineHeight = 20.sp)
         }
     }
 }
+
+/** Tap = talk (tap again to send), press-and-hold = push-to-talk: listens while held, sends on release. */
+private fun Modifier.orbGestures(onTap: () -> Unit, onHoldStart: () -> Unit, onHoldEnd: () -> Unit): Modifier =
+    pointerInput(Unit) {
+        awaitEachGesture {
+            awaitFirstDown(requireUnconsumed = false)
+            val up = withTimeoutOrNull(HOLD_MS) { waitForUpOrCancellation() }
+            if (up != null) {
+                onTap()
+            } else if (currentEvent.changes.any { it.pressed }) {
+                onHoldStart()
+                waitForUpOrCancellation()
+                onHoldEnd()
+            }
+        }
+    }
+
+private const val HOLD_MS = 400L

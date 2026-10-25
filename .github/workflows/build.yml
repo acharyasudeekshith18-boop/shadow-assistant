@@ -20,7 +20,7 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
 
       - name: Unit tests
-        run: ./gradlew testDebugUnitTest --tests '*IntentRouterTest' --tests '*LlmParsingTest'
+        run: ./gradlew testDebugUnitTest --tests '*IntentRouterTest' --tests '*LlmParsingTest' --tests '*SpeechAccumulatorTest' --tests '*AiRouterTest'
 
       - name: Signing key (from repo secrets, if set)
         env:
@@ -43,6 +43,10 @@ jobs:
             cp app/build/outputs/apk/debug/app-debug.apk Shadow.apk
           fi
 
+      - name: Version
+        id: ver
+        run: echo "name=$(grep -oP 'versionName = "\K[^"]+' app/build.gradle.kts)" >> "$GITHUB_OUTPUT"
+
       - uses: actions/upload-artifact@v4
         with:
           name: Shadow-apk
@@ -51,8 +55,8 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.0.${{ github.run_number }}
-          name: Shadow v1.0.${{ github.run_number }}
-          body: "Download **Shadow.apk** below and open it on your Android phone. See the README for setup."
+          tag_name: v${{ steps.ver.outputs.name }}
+          name: Shadow v${{ steps.ver.outputs.name }}
+          body: "Download **Shadow.apk** below and open it on your Android phone (it installs over the old version, your settings stay). See the README changelog for what's new."
           files: Shadow.apk
           make_latest: true

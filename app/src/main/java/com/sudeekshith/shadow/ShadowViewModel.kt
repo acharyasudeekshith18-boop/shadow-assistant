@@ -4,18 +4,22 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.sudeekshith.shadow.ai.ChatTurn
-import com.sudeekshith.shadow.ai.GeminiClient
-import com.sudeekshith.shadow.ai.GroqClient
-import com.sudeekshith.shadow.ai.LlmClient
-import com.sudeekshith.shadow.ai.LlmReply
+import com.sudeekshith.shadow.ai.AiRouter
+import com.sudeekshith.shadow.ai.AllRoutesFailed
+import com.sudeekshith.shadow.ai.HistoryTrim
 import com.sudeekshith.shadow.ai.Persona
+import com.sudeekshith.shadow.ai.RoutedReply
 import com.sudeekshith.shadow.core.Command
 import com.sudeekshith.shadow.core.IntentRouter
+import com.sudeekshith.shadow.core.ListenPolicy
+import com.sudeekshith.shadow.data.DebugLog
 import com.sudeekshith.shadow.data.SettingsStore
 import com.sudeekshith.shadow.system.ActionExecutor
 import com.sudeekshith.shadow.system.Listener
 import com.sudeekshith.shadow.system.ShadowVoice
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
@@ -37,12 +41,15 @@ data class UiState(
     val hasKey: Boolean = false,
     val pendingPermissions: List<String> = emptyList(),
     val openSettings: Boolean = false,
+    val holding: Boolean = false,
+    val hint: String = "",
 )
 
 class ShadowViewModel(app: Application) : AndroidViewModel(app) {
     val settings = SettingsStore(app)
+    val debugLog = DebugLog(app)
     val voice = ShadowVoice(app, settings)
-    private val listener = Listener(app)
+    private val listener = Listener(app) { debugLog.add(it) }
     private val executor = ActionExecutor(app, settings)
 
     private val _state = MutableStateFlow(UiState(messages = settings.loadHistory(), hasKey = settings.geminiKey.isNotBlank() || settings.groqKey.isNotBlank()))
@@ -52,25 +59,28 @@ class ShadowViewModel(app: Application) : AndroidViewModel(app) {
     private var pendingAiText: String = ""
     private var silentTries = 0
     private var greeted = false
+    private var listenJob: Job? = null
+    private var aiJob: Job? = null
 
     init {
-        listener.onPartial = { p -> _state.update { it.copy(partial = p) } }
+        listener.onLive = { p -> _state.update { it.copy(partial = p, hint = "") } }
         listener.onLevel = { l -> _state.update { it.copy(level = l) } }
-        listener.onResult = { text ->
+        listener.onFinished = { text ->
             silentTries = 0
-            _state.update { it.copy(partial = "", level = 0f) }
+            _state.update { it.copy(partial = "", level = 0f, holding = false) }
             handle(text)
         }
+        listener.onNothingHeard = {
+            _state.update { it.copy(partial = "", level = 0f, status = Status.Idle, holding = false) }
+            silentTries++
+            // Continuous mode survives a couple of silences (he may just be thinking).
+            if (_state.value.conversation && silentTries < ListenPolicy.MAX_SILENT_LISTENS) listen(delayMs = 150)
+            else _state.update { it.copy(conversation = false, hint = "Didn't hear anything. Tap the orb, or hold it while you talk.") }
+        }
         listener.onError = { code ->
-            _state.update { it.copy(partial = "", level = 0f, status = Status.Idle) }
-            if (Listener.isSilence(code)) {
-                silentTries++
-                if (_state.value.conversation && silentTries < 2) listen()
-                else _state.update { it.copy(conversation = false) }
-            } else {
-                _state.update { it.copy(conversation = false) }
-                addShadow(Listener.describe(code))
-            }
+            debugLog.add("Speech: ${Listener.name(code)} (code $code)")
+            _state.update { it.copy(partial = "", level = 0f, status = Status.Idle, conversation = false, holding = false) }
+            addShadow(Listener.describe(code), meta = true)
         }
     }
 
@@ -88,36 +98,58 @@ class ShadowViewModel(app: Application) : AndroidViewModel(app) {
         say(line, continueListening = thenListen, force = thenListen)
     }
 
-    /** Big orb / mic button. */
+    /** Tap on the orb: idle -> listen; listening -> send what was heard; thinking/speaking -> stop. */
     fun onOrbTap() {
         when (_state.value.status) {
             Status.Idle -> startConversation()
+            Status.Listening -> if (listener.isActive) listener.release() else stopAll()
             else -> stopAll()
+        }
+    }
+
+    /** Press-and-hold the orb: push-to-talk. Listens until release, never cuts off. */
+    fun onOrbHoldStart() {
+        listenJob?.cancel(); aiJob?.cancel()
+        voice.stop()
+        if (!listener.available) { addShadow("Speech recognition isn't available on this phone. Install the Google app, or type to me below.", meta = true); return }
+        _state.update { it.copy(status = Status.Listening, partial = "", hint = "", holding = true, conversation = false) }
+        listener.begin(settings.listenLanguage, settings.patience, hold = true)
+    }
+
+    fun onOrbHoldEnd() {
+        if (_state.value.holding) {
+            _state.update { it.copy(holding = false) }
+            listener.release()
         }
     }
 
     fun startConversation() {
         silentTries = 0
-        _state.update { it.copy(conversation = settings.continuous) }
+        _state.update { it.copy(conversation = settings.continuous, hint = "") }
         listen()
     }
 
-    private fun listen() {
+    private fun listen(delayMs: Long = 0) {
         voice.stop()
-        if (!listener.available) { addShadow("Speech recognition isn't available on this phone. Install the Google app, or type to me below."); return }
-        _state.update { it.copy(status = Status.Listening, partial = "") }
-        listener.start(settings.listenLanguage)
+        listenJob?.cancel()
+        if (!listener.available) { addShadow("Speech recognition isn't available on this phone. Install the Google app, or type to me below.", meta = true); return }
+        _state.update { it.copy(status = Status.Listening, partial = "", holding = false) }
+        listenJob = viewModelScope.launch {
+            if (delayMs > 0) delay(delayMs)
+            listener.begin(settings.listenLanguage, settings.patience, hold = false)
+        }
     }
 
     fun stopAll() {
-        listener.stop(); voice.stop()
-        _state.update { it.copy(status = Status.Idle, conversation = false, partial = "", level = 0f) }
+        listenJob?.cancel(); aiJob?.cancel()
+        listener.cancel(); voice.stop()
+        _state.update { it.copy(status = Status.Idle, conversation = false, partial = "", level = 0f, holding = false) }
     }
 
     fun submitTyped(text: String) {
         if (text.isBlank()) return
-        listener.stop(); voice.stop()
-        _state.update { it.copy(conversation = false) }
+        listenJob?.cancel(); listener.cancel(); voice.stop()
+        _state.update { it.copy(conversation = false, status = Status.Idle, partial = "") }
         handle(text.trim())
     }
 
@@ -128,42 +160,37 @@ class ShadowViewModel(app: Application) : AndroidViewModel(app) {
         askAi(text)
     }
 
-    private fun clientChain(): List<LlmClient> = buildList {
-        if (settings.geminiKey.isNotBlank()) add(GeminiClient(settings.geminiKey, settings.geminiModel))
-        if (settings.groqKey.isNotBlank()) add(GroqClient(settings.groqKey))
-    }
-
     private fun askAi(text: String) {
-        val chain = clientChain()
-        if (chain.isEmpty()) {
+        val routes = AiRouter.routesFor(settings.geminiKey, settings.groqKey, settings.geminiModel)
+        if (routes.isEmpty()) {
             say("I can do phone commands offline, like open apps, alarms, calls and WhatsApp. To answer questions, add your free Gemini key in Settings.")
             return
         }
         _state.update { it.copy(status = Status.Thinking) }
-        val history = _state.value.messages.dropLast(1).takeLast(12)
+        val history = HistoryTrim.trim(_state.value.messages.dropLast(1))
         val now = SimpleDateFormat("EEEE d MMMM yyyy, h:mm a", Locale.US).format(Date())
         val system = Persona.system(settings.userName, now)
-        viewModelScope.launch {
-            val result = withContext(Dispatchers.IO) {
-                var lastError: Exception? = null
-                for (c in chain) {
-                    try { return@withContext Result.success(c.reply(system, history, text)) } catch (e: Exception) { lastError = e }
-                }
-                Result.failure<LlmReply>(lastError ?: Exception("No AI available"))
+        val router = AiRouter(routes, settings.modelHealth, log = { debugLog.add("AI: $it") })
+        aiJob = viewModelScope.launch {
+            val result: Result<RoutedReply> = withContext(Dispatchers.IO) {
+                try { Result.success(router.ask(system, history, text)) } catch (e: Exception) { Result.failure(e) }
             }
+            if (_state.value.status != Status.Thinking) return@launch   // he tapped stop meanwhile
             result.onSuccess { r ->
-                if (r.commands.isNotEmpty()) run(r.commands, r.text)
-                else say(r.text.ifBlank { "Hmm, I have nothing on that one." })
+                val notice = r.notices.joinToString(" ")
+                if (notice.isNotBlank()) addShadow(notice, meta = true)
+                val reply = r.reply
+                if (reply.commands.isNotEmpty()) run(reply.commands, reply.text, prefix = notice)
+                else say(reply.text, spokenPrefix = notice)
             }.onFailure { e ->
-                val msg = e.message ?: "unknown error"
-                say(if (msg.contains("Unable to resolve host") || msg.contains("failed to connect") || msg.contains("timeout", true))
-                    "I'm offline right now, boss. Phone commands still work, but I need internet to answer questions."
-                else "I couldn't reach the AI: $msg")
+                val spoken = (e as? AllRoutesFailed)?.spoken ?: "Something went wrong: ${e.message}"
+                if (e !is AllRoutesFailed) debugLog.add("AI crash: ${e::class.java.simpleName}: ${e.message}")
+                say(spoken, meta = true)
             }
         }
     }
 
-    private fun run(cmds: List<Command>, aiText: String, askPermissions: Boolean = true) {
+    private fun run(cmds: List<Command>, aiText: String, askPermissions: Boolean = true, prefix: String = "") {
         val first = cmds.first()
         val missing = executor.permissionsFor(first)
         if (askPermissions && missing.isNotEmpty()) {
@@ -179,11 +206,11 @@ class ShadowViewModel(app: Application) : AndroidViewModel(app) {
                      else results.joinToString(" ")
         if (stop) {
             _state.update { it.copy(conversation = false) }
-            say(spoken, continueListening = false)
+            say(spoken, continueListening = false, spokenPrefix = prefix)
         } else {
             // After launching another app, don't keep listening in the background.
             val leavesApp = cmds.any { it is Command.OpenApp || it is Command.Call || it is Command.WhatsApp || it is Command.WebSearch || it is Command.PlayYouTube }
-            say(spoken, continueListening = !leavesApp)
+            say(spoken, continueListening = !leavesApp, spokenPrefix = prefix)
         }
     }
 
@@ -200,22 +227,25 @@ class ShadowViewModel(app: Application) : AndroidViewModel(app) {
 
     fun consumeOpenSettings() = _state.update { it.copy(openSettings = false) }
 
-    private fun say(text: String, continueListening: Boolean = true, force: Boolean = false) {
-        addShadow(text)
+    /** Shows [text], speaks it (with an optional spoken-only [spokenPrefix]), then listens again in conversation mode — only after the voice has fully finished. */
+    private fun say(text: String, continueListening: Boolean = true, force: Boolean = false, meta: Boolean = false, spokenPrefix: String = "") {
+        addShadow(text, meta)
         if (!settings.speakReplies) {
             _state.update { it.copy(status = Status.Idle) }
-            if ((force || _state.value.conversation) && continueListening) listen()
+            if ((force || _state.value.conversation) && continueListening) listen(delayMs = 300)
             return
         }
         _state.update { it.copy(status = Status.Speaking) }
-        voice.speak(text) {
+        val spoken = if (spokenPrefix.isNotBlank()) "$spokenPrefix $text" else text
+        voice.speak(spoken) {
             _state.update { it.copy(status = Status.Idle) }
-            if (continueListening && (force || _state.value.conversation)) listen()
+            // Short pause after the last word so the mic doesn't catch the end of Shadow's own voice.
+            if (continueListening && (force || _state.value.conversation)) listen(delayMs = 450)
         }
     }
 
     private fun addUser(t: String) = append(ChatTurn(true, t))
-    private fun addShadow(t: String) = append(ChatTurn(false, t))
+    private fun addShadow(t: String, meta: Boolean = false) = append(ChatTurn(false, t, meta))
     private fun append(turn: ChatTurn) {
         _state.update { it.copy(messages = (it.messages + turn).takeLast(60)) }
         settings.saveHistory(_state.value.messages)
@@ -227,6 +257,6 @@ class ShadowViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     override fun onCleared() {
-        listener.stop(); voice.shutdown()
+        listener.shutdown(); voice.shutdown()
     }
 }

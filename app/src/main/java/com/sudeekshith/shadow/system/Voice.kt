@@ -2,9 +2,12 @@ package com.sudeekshith.shadow.system
 
 import android.content.Context
 import android.media.AudioAttributes
+import android.media.AudioFocusRequest
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioTrack
 import android.media.MediaPlayer
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -36,6 +39,10 @@ class ShadowVoice(context: Context, private val settings: SettingsStore) {
     private var player: MediaPlayer? = null
     private var track: AudioTrack? = null
     @Volatile private var generation = 0
+    private var waitingText: String? = null
+    private var chunkCount = 0
+    private val audio = ctx.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+    private var focus: AudioFocusRequest? = null
 
     var onReady: (() -> Unit)? = null
 
@@ -44,14 +51,25 @@ class ShadowVoice(context: Context, private val settings: SettingsStore) {
             ready = status == TextToSpeech.SUCCESS
             if (ready) {
                 applyVoice()
+                try {
+                    tts?.setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_ASSISTANT)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
+                } catch (_: Exception) {}
                 tts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                     override fun onStart(id: String?) {}
-                    override fun onDone(id: String?) { main.post { finish() } }
+                    // v1.1 fix: long answers are spoken in several chunks. Only the LAST chunk of the
+                    // CURRENT answer means "done" — v1.0 treated the first sentence's end as done, so the
+                    // mic re-opened mid-answer, cut Shadow off and heard its own voice.
+                    override fun onDone(id: String?) { main.post { utteranceEnded(id, error = false) } }
                     @Deprecated("Deprecated in Java")
-                    override fun onError(id: String?) { main.post { finish() } }
-                    override fun onError(id: String?, errorCode: Int) { main.post { finish() } }
+                    override fun onError(id: String?) { main.post { utteranceEnded(id, error = true) } }
+                    override fun onError(id: String?, errorCode: Int) { main.post { utteranceEnded(id, error = true) } }
+                    override fun onStop(id: String?, interrupted: Boolean) {}
                 })
-                main.post { onReady?.invoke() }
+                main.post {
+                    onReady?.invoke()
+                    waitingText?.let { t -> waitingText = null; if (pendingDone != null) deviceSpeak(t) }
+                }
             }
         }
     }
@@ -102,7 +120,15 @@ class ShadowVoice(context: Context, private val settings: SettingsStore) {
 
     private fun deviceSpeak(text: String) {
         val t = tts
-        if (t == null || !ready) { finish(); return }
+        if (t == null) { finish(); return }
+        if (!ready) {
+            // The phone's voice engine is still starting (first launch): speak as soon as it's ready, give up after 4 s.
+            waitingText = text
+            val gen = generation
+            main.postDelayed({ if (gen == generation && waitingText != null) { waitingText = null; finish() } }, 4000)
+            return
+        }
+        requestFocus()
         applyVoice()
         // Kannada / Hindi script: switch to that language's voice if the phone has it.
         val script = when {
@@ -114,9 +140,15 @@ class ShadowVoice(context: Context, private val settings: SettingsStore) {
         val params = Bundle()
         // TTS has a per-call length limit: split long answers into sentences.
         val chunks = text.split(Regex("(?<=[.!?।])\\s+")).flatMap { it.chunked(3500) }.filter { it.isNotBlank() }
+        if (chunks.isEmpty()) { finish(); return }
+        val gen = generation
+        chunkCount = chunks.size
         chunks.forEachIndexed { i, c ->
-            t.speak(c, if (i == 0) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD, params, if (i == chunks.lastIndex) "last" else "part$i")
+            t.speak(c, if (i == 0) TextToSpeech.QUEUE_FLUSH else TextToSpeech.QUEUE_ADD, params, utteranceId(gen, i, chunks.size))
         }
+        // Safety net: if the voice engine never reports "done", don't leave Shadow stuck in Speaking.
+        val maxMs = (text.length * 110L / settings.speed.coerceAtLeast(0.5f)).toLong() + 6000L
+        main.postDelayed({ if (gen == generation && pendingDone != null) finish() }, maxMs)
     }
 
     private sealed class Audio { class Pcm(val bytes: ByteArray) : Audio(); class Mp3(val file: File) : Audio() }
@@ -178,6 +210,7 @@ class ShadowVoice(context: Context, private val settings: SettingsStore) {
 
     private fun playMp3(f: File) {
         try {
+            requestFocus()
             player = MediaPlayer().apply {
                 setDataSource(f.absolutePath)
                 setOnCompletionListener { finish() }
@@ -196,6 +229,7 @@ class ShadowVoice(context: Context, private val settings: SettingsStore) {
                 .setAudioFormat(AudioFormat.Builder().setSampleRate(rate).setEncoding(AudioFormat.ENCODING_PCM_16BIT)
                     .setChannelMask(AudioFormat.CHANNEL_OUT_MONO).build())
                 .setTransferMode(AudioTrack.MODE_STATIC).setBufferSizeInBytes(pcm.size).build()
+            requestFocus()
             at.write(pcm, 0, pcm.size)
             track = at
             at.play()
@@ -205,10 +239,43 @@ class ShadowVoice(context: Context, private val settings: SettingsStore) {
         } catch (e: Exception) { finish() }
     }
 
+    private fun utteranceEnded(id: String?, error: Boolean) {
+        val gen = generation
+        if (!isFinalUtterance(id, gen)) {
+            // A middle chunk failed: carry on with the rest; a middle chunk finished: nothing to do.
+            return
+        }
+        finish()
+    }
+
     private fun finish() {
+        abandonFocus()
         val cb = pendingDone
         pendingDone = null
         cb?.invoke()
+    }
+
+    private fun requestFocus() {
+        try {
+            if (Build.VERSION.SDK_INT >= 26) {
+                val req = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
+                    .setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_ASSISTANT)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build()).build()
+                focus = req
+                audio.requestAudioFocus(req)
+            } else {
+                @Suppress("DEPRECATION")
+                audio.requestAudioFocus(null, AudioManager.STREAM_MUSIC, AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
+            }
+        } catch (_: Exception) {}
+    }
+
+    private fun abandonFocus() {
+        try {
+            if (Build.VERSION.SDK_INT >= 26) focus?.let { audio.abandonAudioFocusRequest(it) }
+            else @Suppress("DEPRECATION") audio.abandonAudioFocus(null)
+        } catch (_: Exception) {}
+        focus = null
     }
 
     fun isSpeaking(): Boolean = pendingDone != null
@@ -217,6 +284,8 @@ class ShadowVoice(context: Context, private val settings: SettingsStore) {
     fun stop() {
         generation++
         pendingDone = null
+        waitingText = null
+        abandonFocus()
         try { tts?.stop() } catch (_: Exception) {}
         try { player?.release() } catch (_: Exception) {}
         player = null
@@ -229,6 +298,10 @@ class ShadowVoice(context: Context, private val settings: SettingsStore) {
     }
 
     companion object {
+        fun utteranceId(gen: Int, index: Int, total: Int) = if (index == total - 1) "g$gen-last" else "g$gen-part$index"
+        /** True only for the last chunk of the answer that is speaking now. */
+        fun isFinalUtterance(id: String?, gen: Int) = id == "g$gen-last"
+
         // Google TTS male voice ids (en-IN, en-GB, en-US, en-AU)
         val MALE_HINTS = listOf("en-in-x-ene", "en-in-x-end", "en-gb-x-rjs", "en-gb-x-gbd", "en-us-x-iom", "en-us-x-iol", "en-us-x-tpd", "en-au-x-aud", "en-au-x-auc")
     }

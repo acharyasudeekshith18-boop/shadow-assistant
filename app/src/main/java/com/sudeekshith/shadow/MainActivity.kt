@@ -19,6 +19,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.sudeekshith.shadow.ui.DebugLogScreen
 import com.sudeekshith.shadow.ui.MainScreen
 import com.sudeekshith.shadow.ui.SettingsScreen
 import com.sudeekshith.shadow.ui.ShadowTheme
@@ -43,6 +44,7 @@ class MainActivity : ComponentActivity() {
             ShadowTheme {
                 val state by vm.state.collectAsStateWithLifecycle()
                 var showSettings by remember { mutableStateOf(false) }
+                var showDebug by remember { mutableStateOf(false) }
 
                 LaunchedEffect(Unit) {
                     if (savedInstanceState == null) {
@@ -58,7 +60,11 @@ class MainActivity : ComponentActivity() {
                     if (state.openSettings) { showSettings = true; vm.consumeOpenSettings() }
                 }
 
-                if (showSettings) {
+                if (showDebug) {
+                    var entries by remember { mutableStateOf(vm.debugLog.entries()) }
+                    BackHandler { showDebug = false }
+                    DebugLogScreen(entries, onClear = { vm.debugLog.clear(); entries = emptyList() }, onBack = { showDebug = false })
+                } else if (showSettings) {
                     BackHandler { showSettings = false; vm.refreshKeys(); vm.voice.applyVoice() }
                     SettingsScreen(
                         settings = vm.settings,
@@ -66,6 +72,7 @@ class MainActivity : ComponentActivity() {
                         onTestVoice = { vm.voice.applyVoice(); vm.voice.speak("Hello ${vm.settings.userName}. I am Shadow, your personal assistant.") {} },
                         onOpenUrl = { url -> startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) },
                         onBack = { showSettings = false; vm.refreshKeys(); vm.voice.applyVoice() },
+                        onOpenDebugLog = { showDebug = true },
                     )
                 } else {
                     MainScreen(
@@ -74,6 +81,8 @@ class MainActivity : ComponentActivity() {
                         onSend = vm::submitTyped,
                         onSettings = { vm.stopAll(); showSettings = true },
                         onClear = vm::clearChat,
+                        onOrbHoldStart = { if (hasMic()) vm.onOrbHoldStart() else { listenAfterMicGrant = false; micPermission.launch(Manifest.permission.RECORD_AUDIO) } },
+                        onOrbHoldEnd = vm::onOrbHoldEnd,
                     )
                 }
             }

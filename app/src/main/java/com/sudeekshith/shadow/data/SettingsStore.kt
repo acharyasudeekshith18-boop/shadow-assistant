@@ -6,6 +6,7 @@ import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import com.sudeekshith.shadow.ai.ChatTurn
 import com.sudeekshith.shadow.ai.GeminiClient
+import com.sudeekshith.shadow.ai.ModelHealth
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -37,9 +38,10 @@ class SettingsStore(context: Context) {
     var userName: String
         get() = prefs.getString("user_name", "Sudeekshith") ?: "Sudeekshith"
         set(v) = prefs.edit().putString("user_name", v.trim().ifBlank { "Sudeekshith" }).apply()
+    /** "auto" = best free model first, switching automatically when one runs out; or one model id he picked. */
     var geminiModel: String
-        get() = (prefs.getString("gemini_model", GeminiClient.DEFAULT_MODEL) ?: GeminiClient.DEFAULT_MODEL).ifBlank { GeminiClient.DEFAULT_MODEL }
-        set(v) = prefs.edit().putString("gemini_model", v.trim().ifBlank { GeminiClient.DEFAULT_MODEL }).apply()
+        get() = (prefs.getString("gemini_model_v2", GeminiClient.DEFAULT_MODEL) ?: GeminiClient.DEFAULT_MODEL).ifBlank { GeminiClient.DEFAULT_MODEL }
+        set(v) = prefs.edit().putString("gemini_model_v2", v.trim().ifBlank { GeminiClient.DEFAULT_MODEL }).apply()
     /** Speech recognition language: en-IN, kn-IN or hi-IN. */
     var listenLanguage: String
         get() = prefs.getString("listen_lang", "en-IN") ?: "en-IN"
@@ -47,6 +49,10 @@ class SettingsStore(context: Context) {
     var countryCode: String
         get() = prefs.getString("country_code", "91") ?: "91"
         set(v) = prefs.edit().putString("country_code", v.filter { it.isDigit() }.ifBlank { "91" }).apply()
+    /** How long Shadow waits when he pauses mid-sentence: 0 quick, 1 normal, 2 patient. */
+    var patience: Int
+        get() = prefs.getInt("patience", 1)
+        set(v) = prefs.edit().putInt("patience", v.coerceIn(0, 2)).apply()
     var continuous: Boolean
         get() = prefs.getBoolean("continuous", true)
         set(v) = prefs.edit().putBoolean("continuous", v).apply()
@@ -82,12 +88,24 @@ class SettingsStore(context: Context) {
     // ---- chat history (last 60 messages, stored locally) ----
     fun loadHistory(): List<ChatTurn> = try {
         val arr = JSONArray(prefs.getString("history", "[]"))
-        (0 until arr.length()).map { arr.getJSONObject(it).let { o -> ChatTurn(o.getBoolean("u"), o.getString("t")) } }
+        (0 until arr.length()).map { arr.getJSONObject(it).let { o -> ChatTurn(o.getBoolean("u"), o.getString("t"), o.optBoolean("m", false)) } }
     } catch (e: Exception) { emptyList() }
 
     fun saveHistory(list: List<ChatTurn>) {
         val arr = JSONArray()
-        list.takeLast(60).forEach { arr.put(JSONObject().put("u", it.fromUser).put("t", it.text)) }
+        list.takeLast(60).forEach { arr.put(JSONObject().put("u", it.fromUser).put("t", it.text).put("m", it.meta)) }
         prefs.edit().putString("history", arr.toString()).apply()
+    }
+
+    /** Which AI models are out of quota / unavailable, and until when (survives app restarts). */
+    val modelHealth: ModelHealth = object : ModelHealth {
+        override fun coolingUntil(id: String) = prefs.getLong("cool_$id", 0L)
+        override fun cool(id: String, untilMs: Long) = prefs.edit().putLong("cool_$id", untilMs).apply()
+    }
+
+    fun resetModelHealth() {
+        val e = prefs.edit()
+        prefs.all.keys.filter { it.startsWith("cool_") }.forEach { e.remove(it) }
+        e.apply()
     }
 }

@@ -3,6 +3,8 @@ package com.sudeekshith.shadow
 import com.sudeekshith.shadow.ai.ChatTurn
 import com.sudeekshith.shadow.ai.GeminiClient
 import com.sudeekshith.shadow.ai.GroqClient
+import com.sudeekshith.shadow.ai.Failure
+import com.sudeekshith.shadow.ai.LlmException
 import com.sudeekshith.shadow.core.Command
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -38,8 +40,8 @@ class LlmParsingTest {
     }
 
     @Test fun geminiBlocked() {
-        val r = GeminiClient.parseResponse("""{"promptFeedback":{"blockReason":"SAFETY"}}""")
-        assertTrue(r.text.isNotBlank())
+        val e = try { GeminiClient.parseResponse("""{"promptFeedback":{"blockReason":"SAFETY"}}"""); null } catch (e: LlmException) { e }
+        assertEquals(Failure.BLOCKED, e?.kind)
     }
 
     @Test fun groqToolCall() {

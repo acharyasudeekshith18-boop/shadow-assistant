@@ -104,7 +104,9 @@ The GitHub Actions workflow (`.github/workflows/build.yml`) runs the tests, buil
 | `core/IntentRouter.kt` | Offline command parser (regex), unit-tested |
 | `ai/GeminiClient.kt`, `ai/GroqClient.kt`, `ai/Tools.kt` | Free-tier AI calls, function calling, and the persona prompt in `ai/Llm.kt` |
 | `system/ActionExecutor.kt` | Performs actions with standard Android intents |
-| `system/Voice.kt`, `system/Listener.kt` | Shadow's voice and the speech recognizer |
+| `ai/AiRouter.kt` | Model fallback chain: retries, daily-limit detection, Groq and Gemma backup |
+| `system/Voice.kt`, `system/Listener.kt`, `core/SpeechAccumulator.kt` | Shadow's voice, the speech recognizer, and joining speech across pauses |
+| `data/DebugLog.kt` | The last 20 problems, shown in Settings > Debug log |
 | `ui/` | Jetpack Compose screens and the animated orb |
 | `data/SettingsStore.kt` | Encrypted key storage and settings |
 
@@ -116,8 +118,35 @@ The GitHub Actions workflow (`.github/workflows/build.yml`) runs the tests, buil
 - **WhatsApp:** Shadow opens WhatsApp with the message already typed; you tap **Send**. Android doesn't let normal apps send WhatsApp messages silently.
 - **No hands-free wake word:** there's no always-on "Hey Shadow" listening, because that drains the battery and Android restricts it. Use the widget, the tile or the app shortcut instead.
 - **Reminders:** reminders use your Clock app's alarms and timers.
-- **Free limits:** free Gemini, Groq and ElevenLabs keys all have daily limits. The free ElevenLabs plan includes about 10,000 characters a month.
+- **Free limits:** free Gemini, Groq and ElevenLabs keys all have daily limits. On a new free Gemini key, Flash allows about 20 questions a day and Flash-Lite about 500; Shadow switches models by itself and falls back to Gemma (same key, separate limit). Limits reset around 12:30–1:30 PM India time. The free ElevenLabs plan includes about 10,000 characters a month.
 - **Voices:** Kannada and Hindi speech output needs those voices installed in your phone's text-to-speech settings.
+
+## Changelog
+
+### v1.1.0 (25 Oct 2026)
+Fixes from the first real-phone test ("it cuts me off" and "sometimes no proper answer").
+
+**Listening no longer cuts you off**
+- Fixed the main bug: long answers are spoken sentence by sentence, and v1.0 re-opened the mic after the *first* sentence. That cut Shadow's own answer off and made it hear itself. Now the mic only opens after the last word, plus a short pause.
+- Waits longer when you pause (about 3 s, adjustable in Settings: "When I pause while talking, wait…").
+- Shows what you're saying live on screen.
+- If you pause and carry on, Shadow keeps listening and joins the parts together.
+- If the recognizer gives up mid-sentence, the words it already heard are kept instead of being thrown away.
+- **Hold to talk:** press and hold the orb while you speak and let go to send. Nothing gets cut off this way.
+- **Tap to send:** while listening, tap the orb to send what it heard right away.
+- Pauses music while listening; the stuck speech service is restarted by itself; conversation mode no longer ends after a single silence.
+
+**Better answers**
+- Tries Gemini 2.5 Flash, then Gemini Flash, then Flash-Lite, then your Groq key (if added), then Gemma, a backup model with its own free limit on the same Gemini key.
+- Retries once when Google is busy (503) or you hit the per-minute limit.
+- Tells you plainly what happened: "I've hit today's free limit on Gemini Flash, so I switched to…", "No internet", "your key was rejected".
+- Remembers which models are used up today and skips them (faster replies).
+- Answers are longer and complete when you ask for an explanation, and still spoken-style; replies cut by the length limit end on a full sentence.
+- Error messages are no longer sent back to the AI as conversation, and long history is trimmed.
+- New **Settings > Debug log** shows the last 20 problems. Screenshot it to report a bug.
+
+### v1.0.0 (25 Oct 2026)
+First release.
 
 ## License
 
